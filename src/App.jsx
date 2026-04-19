@@ -602,21 +602,42 @@ function App() {
     }
   }
 
-  const handleMoveToFocusQueue = async (checkpointId) => {
+  const handleToggleFocusQueue = async (checkpointId) => {
     const target = checkpoints.find((item) => item.id === checkpointId)
 
-    if (!target || target.status === 'completed' || target.in_focus_queue) {
+    if (!target || target.status === 'completed') {
       return
     }
 
-    const queueItems = checkpoints.filter(
-      (item) => item.in_focus_queue && item.status !== 'completed',
-    )
-
-    const cycleStart = getFocusQueueCycleStart(queueItems) ?? new Date().toISOString()
-    const nowIso = new Date().toISOString()
-
     try {
+      if (target.in_focus_queue) {
+        const updated = await updateCheckpoint(checkpointId, {
+          in_focus_queue: false,
+          focus_queue_added_at: null,
+          focus_queue_cycle_started_at: null,
+        })
+
+        replaceCheckpointInState(updated)
+        showToast('Moved out of FocusQueue')
+
+        if (
+          currentView === VIEW_KEYS.FOCUS_QUEUE
+          && activePage === PAGE_KEYS.DETAIL
+          && selectedCheckpointId === checkpointId
+        ) {
+          setActivePage(PAGE_KEYS.LIST)
+        }
+
+        return
+      }
+
+      const queueItems = checkpoints.filter(
+        (item) => item.in_focus_queue && item.status !== 'completed',
+      )
+
+      const nowIso = new Date().toISOString()
+      const cycleStart = getFocusQueueCycleStart(queueItems) ?? nowIso
+
       const updated = await updateCheckpoint(checkpointId, {
         in_focus_queue: true,
         focus_queue_added_at: nowIso,
@@ -858,9 +879,9 @@ function App() {
                   experimentName={experimentMap.get(checkpoint.experiment_id)?.name ?? 'Unknown experiment'}
                   isSelected={checkpoint.id === selectedCheckpointId}
                   isSavingProgress={savingProgressIds.includes(checkpoint.id)}
-                  canMoveToFocusQueue={!checkpoint.in_focus_queue && checkpoint.status !== 'completed'}
+                  canToggleFocusQueue={checkpoint.status !== 'completed'}
                   onMarkComplete={handleMarkComplete}
-                  onMoveToFocusQueue={handleMoveToFocusQueue}
+                  onToggleFocusQueue={handleToggleFocusQueue}
                   onOpenDetail={handleOpenCheckpointDetail}
                   onProgressChange={handleProgressChange}
                   onRecurringDone={handleRecurringDone}
