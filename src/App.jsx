@@ -22,6 +22,18 @@ import {
   updateExperiment,
 } from './services/experiments'
 
+const VIEW_KEYS = {
+  FOCUS_QUEUE: 'focus_queue',
+  ALL_CHECKPOINTS: 'all_checkpoints',
+  COMPLETED: 'completed_checkpoints',
+  EXPERIMENT: 'experiment_checkpoints',
+}
+
+const PAGE_KEYS = {
+  LIST: 'list',
+  DETAIL: 'detail',
+}
+
 const SORT_OPTIONS = [
   { value: 'newest', label: 'Newest first' },
   { value: 'oldest', label: 'Oldest first' },
@@ -34,9 +46,10 @@ const STATUS_FILTERS = [
   { value: 'all', label: 'All statuses' },
   { value: 'active', label: 'Active' },
   { value: 'blocked', label: 'Blocked' },
-  { value: 'completed', label: 'Completed' },
   { value: 'archived', label: 'Archived' },
 ]
+
+const TWENTY_HOURS_IN_MS = 20 * 60 * 60 * 1000
 
 function asDateValue(value) {
   return value ? new Date(value).getTime() : 0
@@ -71,16 +84,54 @@ function readableError(error) {
   return 'Something went wrong.'
 }
 
+function getFocusQueueCycleStart(queueItems) {
+  if (!queueItems.length) {
+    return null
+  }
+
+  const cycleTimes = queueItems
+    .map((item) => asDateValue(item.focus_queue_cycle_started_at))
+    .filter((value) => value > 0)
+
+  if (cycleTimes.length > 0) {
+    return new Date(Math.min(...cycleTimes)).toISOString()
+  }
+
+  const addedTimes = queueItems
+    .map((item) => asDateValue(item.focus_queue_added_at))
+    .filter((value) => value > 0)
+
+  if (addedTimes.length > 0) {
+    return new Date(Math.min(...addedTimes)).toISOString()
+  }
+
+  return new Date().toISOString()
+}
+
+function formatRemaining(ms) {
+  if (ms <= 0) {
+    return '00h 00m'
+  }
+
+  const totalMinutes = Math.ceil(ms / 60000)
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+
+  return `${String(hours).padStart(2, '0')}h ${String(minutes).padStart(2, '0')}m`
+}
+
 function App() {
   const [experiments, setExperiments] = useState([])
   const [checkpoints, setCheckpoints] = useState([])
   const [searchText, setSearchText] = useState('')
   const [sortMode, setSortMode] = useState('newest')
   const [statusFilter, setStatusFilter] = useState('all')
-  const [activeExperimentFilter, setActiveExperimentFilter] = useState('all')
+  const [currentView, setCurrentView] = useState(VIEW_KEYS.FOCUS_QUEUE)
+  const [selectedExperimentId, setSelectedExperimentId] = useState(null)
   const [selectedCheckpointId, setSelectedCheckpointId] = useState(null)
-  const [activePage, setActivePage] = useState('overview')
+  const [activePage, setActivePage] = useState(PAGE_KEYS.LIST)
   const [isOptionsOpen, setIsOptionsOpen] = useState(false)
+  const [queueNowTick, setQueueNowTick] = useState(0)
   const [toast, setToast] = useState(null)
   const [errorBanner, setErrorBanner] = useState(
     isSupabaseConfigured ? '' : supabaseConfigurationError,
@@ -97,16 +148,76 @@ function App() {
   const [editingExperiment, setEditingExperiment] = useState(null)
   const [savingProgressIds, setSavingProgressIds] = useState([])
   const progressTimers = useRef({})
+  const queueMutationRef = useRef(false)
 
   const experimentMap = useMemo(
     () => new Map(experiments.map((experiment) => [experiment.id, experiment])),
     [experiments],
   )
 
+  const focusQueueCheckpoints = useMemo(
+    () => checkpoints.filter((checkpoint) => checkpoint.in_focus_queue && checkpoint.status !== 'completed'),
+    [checkpoints],
+  )
+
+  const completedCheckpoints = useMemo(
+    () => checkpoints.filter((checkpoint) => checkpoint.status === 'completed'),
+    [checkpoints],
+  )
+
+  const allCheckpoints = useMemo(
+    () => checkpoints.filter((checkpoint) => checkpoint.status !== 'completed' && !checkpoint.in_focus_queue),
+    [checkpoints],
+  )
+
+  const experimentCheckpoints = useMemo(() => {
+    if (!selectedExperimentId) {
+      return []
+    }
+
+    return checkpoints.filter(
+      (checkpoint) => checkpoint.experiment_id === selectedExperimentId && !checkpoint.in_focus_queue,
+    )
+  }, [checkpoints, selectedExperimentId])
+
+  const focusQueueCycleStart = useMemo(
+    () => getFocusQueueCycleStart(focusQueueCheckpoints),
+    [focusQueueCheckpoints],
+  )
+
+  const focusQueueExpiresAt = useMemo(() => {
+    if (!focusQueueCycleStart) {
+      return null
+    }
+
+    return asDateValue(focusQueueCycleStart) + TWENTY_HOURS_IN_MS
+  }, [focusQueueCycleStart])
+
+  const focusQueueRemainingMs = useMemo(() => {
+    if (!focusQueueExpiresAt) {
+      return 0
+    }
+
+    return Math.max(0, focusQueueExpiresAt - queueNowTick)
+  }, [focusQueueExpiresAt, queueNowTick])
+
+  const baseList = useMemo(() => {
+    switch (currentView) {
+      case VIEW_KEYS.ALL_CHECKPOINTS:
+        return allCheckpoints
+      case VIEW_KEYS.COMPLETED:
+        return completedCheckpoints
+      case VIEW_KEYS.EXPERIMENT:
+        return experimentCheckpoints
+      default:
+        return focusQueueCheckpoints
+    }
+  }, [allCheckpoints, completedCheckpoints, currentView, experimentCheckpoints, focusQueueCheckpoints])
+
   const visibleCheckpoints = useMemo(() => {
     const lowerSearch = searchText.trim().toLowerCase()
 
-    const filtered = checkpoints.filter((checkpoint) => {
+    let filtered = baseList.filter((checkpoint) => {
       const title = checkpoint.title?.toLowerCase() ?? ''
       const description = checkpoint.description?.toLowerCase() ?? ''
 
@@ -114,24 +225,40 @@ function App() {
         return false
       }
 
-      if (statusFilter !== 'all' && checkpoint.status !== statusFilter) {
-        return false
-      }
-
-      if (activeExperimentFilter !== 'all' && checkpoint.experiment_id !== activeExperimentFilter) {
+      if (currentView !== VIEW_KEYS.COMPLETED && statusFilter !== 'all' && checkpoint.status !== statusFilter) {
         return false
       }
 
       return true
     })
 
-    return bySortMode(filtered, sortMode)
-  }, [checkpoints, searchText, statusFilter, activeExperimentFilter, sortMode])
+    if (currentView === VIEW_KEYS.EXPERIMENT && statusFilter === 'all') {
+      const activeItems = bySortMode(filtered.filter((item) => item.status !== 'completed'), sortMode)
+      const completedItems = bySortMode(filtered.filter((item) => item.status === 'completed'), sortMode)
+      return [...activeItems, ...completedItems]
+    }
+
+    filtered = bySortMode(filtered, sortMode)
+    return filtered
+  }, [baseList, currentView, searchText, sortMode, statusFilter])
 
   const selectedCheckpoint = useMemo(
     () => checkpoints.find((checkpoint) => checkpoint.id === selectedCheckpointId) ?? null,
     [checkpoints, selectedCheckpointId],
   )
+
+  const viewTitle = useMemo(() => {
+    switch (currentView) {
+      case VIEW_KEYS.ALL_CHECKPOINTS:
+        return 'All checkpoints'
+      case VIEW_KEYS.COMPLETED:
+        return 'Completed checkpoints'
+      case VIEW_KEYS.EXPERIMENT:
+        return experimentMap.get(selectedExperimentId)?.name ?? 'Experiment checkpoints'
+      default:
+        return 'FocusQueue'
+    }
+  }, [currentView, experimentMap, selectedExperimentId])
 
   const showToast = useCallback((message, type = 'success') => {
     setToast({ id: Date.now(), message, type })
@@ -154,18 +281,22 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (selectedCheckpointId && checkpoints.some((item) => item.id === selectedCheckpointId)) {
-      return
-    }
-
-    setSelectedCheckpointId(visibleCheckpoints[0]?.id ?? null)
-  }, [checkpoints, selectedCheckpointId, visibleCheckpoints])
+    setIsOptionsOpen(false)
+  }, [currentView, activePage])
 
   useEffect(() => {
-    if (activePage === 'detail' && !selectedCheckpoint) {
-      setActivePage('overview')
+    if (!focusQueueExpiresAt) {
+      return undefined
     }
-  }, [activePage, selectedCheckpoint])
+
+    setQueueNowTick(Date.now())
+
+    const timerId = window.setInterval(() => {
+      setQueueNowTick(Date.now())
+    }, 30000)
+
+    return () => window.clearInterval(timerId)
+  }, [focusQueueExpiresAt])
 
   const loadExperimentsData = useCallback(async () => {
     setLoadingExperiments(true)
@@ -204,6 +335,26 @@ function App() {
     loadCheckpointsData()
   }, [loadExperimentsData, loadCheckpointsData])
 
+  useEffect(() => {
+    if (selectedCheckpointId && visibleCheckpoints.some((checkpoint) => checkpoint.id === selectedCheckpointId)) {
+      return
+    }
+
+    setSelectedCheckpointId(visibleCheckpoints[0]?.id ?? null)
+  }, [selectedCheckpointId, visibleCheckpoints])
+
+  useEffect(() => {
+    if (activePage === PAGE_KEYS.DETAIL && !selectedCheckpoint) {
+      setActivePage(PAGE_KEYS.LIST)
+    }
+  }, [activePage, selectedCheckpoint])
+
+  const replaceCheckpointInState = useCallback((updatedCheckpoint) => {
+    setCheckpoints((previous) =>
+      previous.map((checkpoint) => (checkpoint.id === updatedCheckpoint.id ? updatedCheckpoint : checkpoint)),
+    )
+  }, [])
+
   const openCreateExperimentModal = () => {
     setExperimentModalMode('create')
     setEditingExperiment(null)
@@ -234,7 +385,8 @@ function App() {
       } else {
         const created = await createExperiment(payload)
         setExperiments((previous) => [created, ...previous])
-        setActiveExperimentFilter(created.id)
+        setCurrentView(VIEW_KEYS.EXPERIMENT)
+        setSelectedExperimentId(created.id)
         showToast('Experiment created')
       }
 
@@ -264,8 +416,9 @@ function App() {
       setExperiments((previous) => previous.filter((item) => item.id !== experimentId))
       setCheckpoints((previous) => previous.filter((item) => item.experiment_id !== experimentId))
 
-      if (activeExperimentFilter === experimentId) {
-        setActiveExperimentFilter('all')
+      if (selectedExperimentId === experimentId) {
+        setSelectedExperimentId(null)
+        setCurrentView(VIEW_KEYS.ALL_CHECKPOINTS)
       }
 
       showToast('Experiment deleted')
@@ -285,6 +438,10 @@ function App() {
 
       const created = await createCheckpoint({
         ...payload,
+        recurring_count: 0,
+        in_focus_queue: false,
+        focus_queue_added_at: null,
+        focus_queue_cycle_started_at: null,
         sort_order: highestOrder + 1,
       })
 
@@ -306,9 +463,7 @@ function App() {
 
     try {
       const updated = await updateCheckpoint(checkpointId, updates)
-      setCheckpoints((previous) =>
-        previous.map((checkpoint) => (checkpoint.id === updated.id ? updated : checkpoint)),
-      )
+      replaceCheckpointInState(updated)
       showToast('Checkpoint saved')
       return true
     } catch (error) {
@@ -339,7 +494,7 @@ function App() {
 
       if (selectedCheckpointId === checkpointId) {
         setSelectedCheckpointId(null)
-        setActivePage('overview')
+        setActivePage(PAGE_KEYS.LIST)
       }
 
       showToast('Checkpoint deleted')
@@ -360,7 +515,8 @@ function App() {
 
       progressTimers.current[checkpointId] = window.setTimeout(async () => {
         try {
-          await updateCheckpoint(checkpointId, { progress: progressValue })
+          const updated = await updateCheckpoint(checkpointId, { progress: progressValue })
+          replaceCheckpointInState(updated)
         } catch (error) {
           setErrorBanner(readableError(error))
           showToast('Could not save progress', 'error')
@@ -370,10 +526,16 @@ function App() {
         }
       }, 280)
     },
-    [loadCheckpointsData, showToast],
+    [loadCheckpointsData, replaceCheckpointInState, showToast],
   )
 
   const handleProgressChange = (checkpointId, nextProgress) => {
+    const target = checkpoints.find((item) => item.id === checkpointId)
+
+    if (!target || target.type !== 'one_time' || target.status === 'completed') {
+      return
+    }
+
     setCheckpoints((previous) =>
       previous.map((checkpoint) => (
         checkpoint.id === checkpointId
@@ -385,19 +547,166 @@ function App() {
     saveProgressSoon(checkpointId, nextProgress)
   }
 
-  const handleOpenCheckpointDetail = (checkpointId) => {
-    setSelectedCheckpointId(checkpointId)
-    setActivePage('detail')
-    setIsOptionsOpen(false)
+  const handleRecurringDone = async (checkpointId) => {
+    const target = checkpoints.find((item) => item.id === checkpointId)
+
+    if (!target || target.type !== 'recurring' || target.status === 'completed') {
+      return
+    }
+
+    const nextCount = (target.recurring_count ?? 0) + 1
+
+    setCheckpoints((previous) =>
+      previous.map((checkpoint) => (
+        checkpoint.id === checkpointId
+          ? { ...checkpoint, recurring_count: nextCount }
+          : checkpoint
+      )),
+    )
+
+    try {
+      const updated = await updateCheckpoint(checkpointId, { recurring_count: nextCount })
+      replaceCheckpointInState(updated)
+    } catch (error) {
+      setErrorBanner(readableError(error))
+      showToast('Could not update recurring count', 'error')
+      await loadCheckpointsData()
+    }
   }
 
-  const handleBackToOverview = () => {
-    setActivePage('overview')
+  const handleMarkComplete = async (checkpointId) => {
+    const target = checkpoints.find((item) => item.id === checkpointId)
+
+    if (!target || target.status === 'completed') {
+      return
+    }
+
+    setErrorBanner('')
+
+    try {
+      const updated = await updateCheckpoint(checkpointId, {
+        status: 'completed',
+        in_focus_queue: false,
+        focus_queue_added_at: null,
+        focus_queue_cycle_started_at: null,
+      })
+
+      replaceCheckpointInState(updated)
+      showToast('Checkpoint moved to Completed Checkpoints')
+
+      if (activePage === PAGE_KEYS.DETAIL) {
+        setActivePage(PAGE_KEYS.LIST)
+      }
+    } catch (error) {
+      setErrorBanner(readableError(error))
+    }
   }
 
-  const handleSelectExperimentFilter = (nextFilter) => {
-    setActiveExperimentFilter(nextFilter)
-    setActivePage('overview')
+  const handleMoveToFocusQueue = async (checkpointId) => {
+    const target = checkpoints.find((item) => item.id === checkpointId)
+
+    if (!target || target.status === 'completed' || target.in_focus_queue) {
+      return
+    }
+
+    const queueItems = checkpoints.filter(
+      (item) => item.in_focus_queue && item.status !== 'completed',
+    )
+
+    const cycleStart = getFocusQueueCycleStart(queueItems) ?? new Date().toISOString()
+    const nowIso = new Date().toISOString()
+
+    try {
+      const updated = await updateCheckpoint(checkpointId, {
+        in_focus_queue: true,
+        focus_queue_added_at: nowIso,
+        focus_queue_cycle_started_at: cycleStart,
+      })
+
+      replaceCheckpointInState(updated)
+      showToast('Moved to FocusQueue')
+    } catch (error) {
+      setErrorBanner(readableError(error))
+    }
+  }
+
+  const emptyFocusQueue = useCallback(
+    async (reason = 'manual') => {
+      if (queueMutationRef.current) {
+        return
+      }
+
+      const queueIds = focusQueueCheckpoints.map((item) => item.id)
+
+      if (queueIds.length === 0) {
+        if (reason === 'manual') {
+          showToast('FocusQueue is already empty', 'error')
+        }
+        return
+      }
+
+      if (reason === 'manual') {
+        const shouldEmpty = window.confirm('Empty FocusQueue now?')
+        if (!shouldEmpty) {
+          return
+        }
+      }
+
+      queueMutationRef.current = true
+      const queueIdSet = new Set(queueIds)
+
+      try {
+        const updatedRows = await Promise.all(
+          queueIds.map((checkpointId) =>
+            updateCheckpoint(checkpointId, {
+              in_focus_queue: false,
+              focus_queue_added_at: null,
+              focus_queue_cycle_started_at: null,
+            })),
+        )
+
+        const updatedMap = new Map(updatedRows.map((row) => [row.id, row]))
+
+        setCheckpoints((previous) =>
+          previous.map((checkpoint) => updatedMap.get(checkpoint.id) ?? checkpoint),
+        )
+
+        if (selectedCheckpointId && queueIdSet.has(selectedCheckpointId)) {
+          setSelectedCheckpointId(null)
+          setActivePage(PAGE_KEYS.LIST)
+        }
+
+        showToast(
+          reason === 'auto' ? 'FocusQueue cycle ended. Queue emptied automatically.' : 'FocusQueue emptied.',
+        )
+      } catch (error) {
+        setErrorBanner(readableError(error))
+      } finally {
+        queueMutationRef.current = false
+      }
+    },
+    [focusQueueCheckpoints, selectedCheckpointId, showToast],
+  )
+
+  useEffect(() => {
+    if (!focusQueueExpiresAt) {
+      return
+    }
+
+    if (queueNowTick >= focusQueueExpiresAt) {
+      emptyFocusQueue('auto')
+    }
+  }, [emptyFocusQueue, focusQueueExpiresAt, queueNowTick])
+
+  const handleSelectView = (view, experimentId = null) => {
+    setCurrentView(view)
+
+    if (view === VIEW_KEYS.EXPERIMENT) {
+      setSelectedExperimentId(experimentId)
+    }
+
+    setActivePage(PAGE_KEYS.LIST)
+    setIsSidebarOpen(false)
   }
 
   const openCheckpointModal = () => {
@@ -405,18 +714,35 @@ function App() {
     setIsFloatingMenuOpen(false)
   }
 
+  const handleOpenCheckpointDetail = (checkpointId) => {
+    setSelectedCheckpointId(checkpointId)
+    setActivePage(PAGE_KEYS.DETAIL)
+  }
+
+  const defaultExperimentForCreate = useMemo(() => {
+    if (currentView === VIEW_KEYS.EXPERIMENT && selectedExperimentId) {
+      return selectedExperimentId
+    }
+
+    return experiments[0]?.id ?? ''
+  }, [currentView, experiments, selectedExperimentId])
+
   return (
     <div className="app-shell">
       <ExperimentSidebar
         experiments={experiments}
-        activeExperimentFilter={activeExperimentFilter}
+        currentView={currentView}
         isLoading={loadingExperiments}
         isOpen={isSidebarOpen}
+        selectedExperimentId={selectedExperimentId}
         onClose={() => setIsSidebarOpen(false)}
         onCreateExperiment={openCreateExperimentModal}
         onDeleteExperiment={handleDeleteExperiment}
         onEditExperiment={openEditExperimentModal}
-        onSelectFilter={handleSelectExperimentFilter}
+        onSelectAllCheckpoints={() => handleSelectView(VIEW_KEYS.ALL_CHECKPOINTS)}
+        onSelectCompleted={() => handleSelectView(VIEW_KEYS.COMPLETED)}
+        onSelectExperiment={(experimentId) => handleSelectView(VIEW_KEYS.EXPERIMENT, experimentId)}
+        onSelectFocusQueue={() => handleSelectView(VIEW_KEYS.FOCUS_QUEUE)}
       />
 
       <div
@@ -438,57 +764,70 @@ function App() {
 
           <div>
             <p className="eyebrow">Overview page</p>
-            <h1>{activePage === 'overview' ? 'Checkpoint overview' : 'Checkpoint detail page'}</h1>
+            <h1>{activePage === PAGE_KEYS.LIST ? viewTitle : 'Checkpoint detail page'}</h1>
           </div>
 
           <div className="topbar-actions">
-            {activePage === 'overview' ? (
-              <div className="options-wrap">
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => setIsOptionsOpen((current) => !current)}
-                >
-                  Options
-                </button>
-
-                {isOptionsOpen ? (
-                  <div className="options-menu">
-                    <label className="field">
-                      <span>Status</span>
-                      <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-                        {STATUS_FILTERS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="field">
-                      <span>Sort</span>
-                      <select value={sortMode} onChange={(event) => setSortMode(event.target.value)}>
-                        {SORT_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <button type="button" className="btn btn-ghost" onClick={handleBackToOverview}>
-                Back to overview
+            {activePage === PAGE_KEYS.DETAIL ? (
+              <button type="button" className="btn btn-ghost" onClick={() => setActivePage(PAGE_KEYS.LIST)}>
+                Back to list
               </button>
+            ) : (
+              <div className="topbar-actions-row">
+                {currentView === VIEW_KEYS.FOCUS_QUEUE && focusQueueCheckpoints.length > 0 ? (
+                  <>
+                    <span className="queue-timer">Ends in {formatRemaining(focusQueueRemainingMs)}</span>
+                    <button type="button" className="btn btn-ghost" onClick={() => emptyFocusQueue('manual')}>
+                      Empty Queue Now
+                    </button>
+                  </>
+                ) : null}
+
+                <div className="options-wrap">
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => setIsOptionsOpen((current) => !current)}
+                  >
+                    Options
+                  </button>
+
+                  {isOptionsOpen ? (
+                    <div className="options-menu">
+                      {currentView !== VIEW_KEYS.COMPLETED ? (
+                        <label className="field">
+                          <span>Status</span>
+                          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                            {STATUS_FILTERS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : null}
+
+                      <label className="field">
+                        <span>Sort</span>
+                        <select value={sortMode} onChange={(event) => setSortMode(event.target.value)}>
+                          {SORT_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
             )}
           </div>
         </header>
 
         {errorBanner ? <p className="error-banner">{errorBanner}</p> : null}
 
-        {activePage === 'overview' ? (
+        {activePage === PAGE_KEYS.LIST ? (
           <>
             <section className="search-row">
               <label className="field">
@@ -507,8 +846,8 @@ function App() {
 
               {!loadingCheckpoints && visibleCheckpoints.length === 0 ? (
                 <div className="empty-block">
-                  <h2>No checkpoints yet</h2>
-                  <p>Add one using the + button.</p>
+                  <h2>No checkpoints found</h2>
+                  <p>Use + to add, or change your filter/search.</p>
                 </div>
               ) : null}
 
@@ -519,8 +858,12 @@ function App() {
                   experimentName={experimentMap.get(checkpoint.experiment_id)?.name ?? 'Unknown experiment'}
                   isSelected={checkpoint.id === selectedCheckpointId}
                   isSavingProgress={savingProgressIds.includes(checkpoint.id)}
+                  canMoveToFocusQueue={!checkpoint.in_focus_queue && checkpoint.status !== 'completed'}
+                  onMarkComplete={handleMarkComplete}
+                  onMoveToFocusQueue={handleMoveToFocusQueue}
                   onOpenDetail={handleOpenCheckpointDetail}
                   onProgressChange={handleProgressChange}
+                  onRecurringDone={handleRecurringDone}
                 />
               ))}
             </section>
@@ -530,9 +873,11 @@ function App() {
             checkpoint={selectedCheckpoint}
             experimentName={selectedCheckpoint ? (experimentMap.get(selectedCheckpoint.experiment_id)?.name ?? 'Unknown experiment') : ''}
             isSavingProgress={selectedCheckpoint ? savingProgressIds.includes(selectedCheckpoint.id) : false}
-            onBack={handleBackToOverview}
+            onBack={() => setActivePage(PAGE_KEYS.LIST)}
             onDeleteCheckpoint={handleDeleteCheckpoint}
+            onMarkComplete={handleMarkComplete}
             onProgressChange={handleProgressChange}
+            onRecurringDone={handleRecurringDone}
             onUpdateCheckpoint={handleUpdateCheckpoint}
           />
         )}
@@ -571,8 +916,8 @@ function App() {
       />
 
       <CheckpointFormModal
-        key={`checkpoint-modal-${String(isCheckpointModalOpen)}-${activeExperimentFilter}`}
-        defaultExperimentId={activeExperimentFilter === 'all' ? experiments[0]?.id : activeExperimentFilter}
+        key={`checkpoint-modal-${String(isCheckpointModalOpen)}-${defaultExperimentForCreate}`}
+        defaultExperimentId={defaultExperimentForCreate}
         experiments={experiments}
         isOpen={isCheckpointModalOpen}
         isSaving={isCheckpointSaving}

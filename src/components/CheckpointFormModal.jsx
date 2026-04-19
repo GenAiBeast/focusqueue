@@ -7,7 +7,6 @@ function buildInitial(experiments, defaultExperimentId) {
     description: '',
     type: 'one_time',
     status: 'active',
-    progress: 0,
   }
 }
 
@@ -137,7 +136,6 @@ function CheckpointFormModal({
               >
                 <option value="active">Active</option>
                 <option value="blocked">Blocked</option>
-                <option value="completed">Completed</option>
                 <option value="archived">Archived</option>
               </select>
             </label>

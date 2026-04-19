@@ -15,7 +15,9 @@ function CheckpointDetailPanel({
   isSavingProgress,
   onBack,
   onDeleteCheckpoint,
+  onMarkComplete,
   onProgressChange,
+  onRecurringDone,
   onUpdateCheckpoint,
 }) {
   const [draft, setDraft] = useState(null)
@@ -35,13 +37,14 @@ function CheckpointDetailPanel({
         <h2>Checkpoint detail</h2>
         <p>Select a checkpoint card to open details.</p>
         <button type="button" className="btn btn-ghost" onClick={onBack}>
-          Back to overview
+          Back to list
         </button>
       </section>
     )
   }
 
   const progressValue = Number.isFinite(checkpoint.progress) ? checkpoint.progress : 0
+  const recurringCount = Number.isFinite(checkpoint.recurring_count) ? checkpoint.recurring_count : 0
 
   const save = async (event) => {
     event.preventDefault()
@@ -120,29 +123,67 @@ function CheckpointDetailPanel({
           >
             <option value="active">Active</option>
             <option value="blocked">Blocked</option>
-            <option value="completed">Completed</option>
             <option value="archived">Archived</option>
+            <option value="completed">Completed</option>
           </select>
         </label>
 
-        <label className="field">
-          <span>Progress</span>
-          <div className="flag-progress flag-progress-slider">
-            <span className="flag red">Red</span>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={progressValue}
-              onChange={(event) => onProgressChange(checkpoint.id, Number(event.target.value))}
-            />
-            <span className="flag green">Green</span>
+        {draft.type === 'recurring' ? (
+          <div className="field">
+            <span>Recurring completion</span>
+            <div className="recurring-row detail-recurring-row">
+              <button
+                type="button"
+                className="btn btn-ghost compact-btn"
+                onClick={() => onRecurringDone(checkpoint.id)}
+                disabled={checkpoint.status === 'completed'}
+              >
+                Done
+              </button>
+              <input type="text" className="recurring-count" value={recurringCount} readOnly />
+              <span className="recurring-label">Times</span>
+              {checkpoint.status !== 'completed' ? (
+                <button
+                  type="button"
+                  className="btn btn-primary compact-btn"
+                  onClick={() => onMarkComplete(checkpoint.id)}
+                >
+                  Mark Complete
+                </button>
+              ) : null}
+            </div>
           </div>
-          <div className="detail-progress-value-row">
-            <span className="muted">{isSavingProgress ? 'Saving progress...' : 'Progress'}</span>
-            <strong>{progressValue}%</strong>
-          </div>
-        </label>
+        ) : (
+          <label className="field">
+            <span>Progress</span>
+            <div className="flag-progress flag-progress-slider">
+              <span className="flag red">Red</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={progressValue}
+                onChange={(event) => onProgressChange(checkpoint.id, Number(event.target.value))}
+                disabled={checkpoint.status === 'completed'}
+              />
+              <span className="flag green">Green</span>
+            </div>
+            <div className="detail-progress-value-row">
+              <span className="muted">{isSavingProgress ? 'Saving progress...' : 'Progress'}</span>
+              <strong>{progressValue}%</strong>
+            </div>
+
+            {checkpoint.status !== 'completed' ? (
+              <button
+                type="button"
+                className="btn btn-primary compact-btn detail-mark-complete"
+                onClick={() => onMarkComplete(checkpoint.id)}
+              >
+                Mark Complete
+              </button>
+            ) : null}
+          </label>
+        )}
 
         <button type="submit" className="btn btn-primary">
           Save checkpoint

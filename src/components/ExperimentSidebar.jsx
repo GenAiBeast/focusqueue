@@ -1,7 +1,11 @@
 ﻿function ExperimentSidebar({
   experiments,
-  activeExperimentFilter,
-  onSelectFilter,
+  currentView,
+  selectedExperimentId,
+  onSelectFocusQueue,
+  onSelectAllCheckpoints,
+  onSelectCompleted,
+  onSelectExperiment,
   onCreateExperiment,
   onEditExperiment,
   onDeleteExperiment,
@@ -13,8 +17,8 @@
     <aside className={`sidebar ${isOpen ? 'is-open' : ''}`}>
       <div className="sidebar-header">
         <div>
-          <p className="eyebrow">Experiment listing</p>
-          <h2>Experiments</h2>
+          <p className="eyebrow">Navigation</p>
+          <h2>Views</h2>
         </div>
 
         <button type="button" className="btn btn-ghost sidebar-close" onClick={onClose}>
@@ -22,13 +26,36 @@
         </button>
       </div>
 
-      <button
-        type="button"
-        className={`experiment-filter-all ${activeExperimentFilter === 'all' ? 'is-selected' : ''}`}
-        onClick={() => onSelectFilter('all')}
-      >
-        All experiments
-      </button>
+      <div className="sidebar-views">
+        <button
+          type="button"
+          className={`view-tab ${currentView === 'focus_queue' ? 'is-selected' : ''}`}
+          onClick={onSelectFocusQueue}
+        >
+          FocusQueue
+        </button>
+        <button
+          type="button"
+          className={`view-tab ${currentView === 'all_checkpoints' ? 'is-selected' : ''}`}
+          onClick={onSelectAllCheckpoints}
+        >
+          All Checkpoints
+        </button>
+        <button
+          type="button"
+          className={`view-tab ${currentView === 'completed_checkpoints' ? 'is-selected' : ''}`}
+          onClick={onSelectCompleted}
+        >
+          Completed Checkpoints
+        </button>
+      </div>
+
+      <div className="sidebar-divider" />
+
+      <div>
+        <p className="eyebrow">Experiment listing</p>
+        <h3 className="sidebar-subheading">Experiments</h3>
+      </div>
 
       <div className="sidebar-list" role="list" aria-label="Experiments list">
         {isLoading ? <p className="muted">Loading experiments...</p> : null}
@@ -38,7 +65,7 @@
         ) : null}
 
         {experiments.map((experiment) => {
-          const isSelected = activeExperimentFilter === experiment.id
+          const isSelected = currentView === 'experiment_checkpoints' && selectedExperimentId === experiment.id
 
           return (
             <article
@@ -49,7 +76,7 @@
               <button
                 type="button"
                 className="experiment-link"
-                onClick={() => onSelectFilter(experiment.id)}
+                onClick={() => onSelectExperiment(experiment.id)}
               >
                 <span className="experiment-name">{experiment.name}</span>
                 <span className="experiment-meta-line">

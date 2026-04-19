@@ -21,19 +21,43 @@ create table if not exists public.checkpoints (
   description text,
   type text not null default 'one_time' check (type in ('one_time', 'recurring')),
   progress integer not null default 0 check (progress >= 0 and progress <= 100),
+  recurring_count integer not null default 0 check (recurring_count >= 0),
   status text not null default 'active' check (status in ('active', 'blocked', 'completed', 'archived')),
+  in_focus_queue boolean not null default false,
+  focus_queue_added_at timestamptz,
+  focus_queue_cycle_started_at timestamptz,
   sort_order integer not null default 0,
   created_at timestamptz not null default timezone('utc', now()),
   updated_at timestamptz not null default timezone('utc', now())
 );
 
--- Safe migration for existing projects created before checkpoint type existed.
+-- Safe migration for existing projects.
 alter table public.checkpoints
   add column if not exists type text;
+
+alter table public.checkpoints
+  add column if not exists recurring_count integer;
+
+alter table public.checkpoints
+  add column if not exists in_focus_queue boolean;
+
+alter table public.checkpoints
+  add column if not exists focus_queue_added_at timestamptz;
+
+alter table public.checkpoints
+  add column if not exists focus_queue_cycle_started_at timestamptz;
 
 update public.checkpoints
 set type = 'one_time'
 where type is null;
+
+update public.checkpoints
+set recurring_count = 0
+where recurring_count is null;
+
+update public.checkpoints
+set in_focus_queue = false
+where in_focus_queue is null;
 
 do $$
 begin
@@ -46,6 +70,16 @@ begin
       add constraint checkpoints_type_check
       check (type in ('one_time', 'recurring'));
   end if;
+
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'checkpoints_recurring_count_check'
+  ) then
+    alter table public.checkpoints
+      add constraint checkpoints_recurring_count_check
+      check (recurring_count >= 0);
+  end if;
 end;
 $$;
 
@@ -54,6 +88,18 @@ alter table public.checkpoints
 
 alter table public.checkpoints
   alter column type set not null;
+
+alter table public.checkpoints
+  alter column recurring_count set default 0;
+
+alter table public.checkpoints
+  alter column recurring_count set not null;
+
+alter table public.checkpoints
+  alter column in_focus_queue set default false;
+
+alter table public.checkpoints
+  alter column in_focus_queue set not null;
 
 create or replace function public.set_updated_at()
 returns trigger
@@ -82,6 +128,9 @@ create index if not exists idx_checkpoints_experiment_id
 
 create index if not exists idx_checkpoints_created_at
   on public.checkpoints (created_at desc);
+
+create index if not exists idx_checkpoints_in_focus_queue
+  on public.checkpoints (in_focus_queue, focus_queue_cycle_started_at);
 
 create index if not exists idx_checkpoints_experiment_order
   on public.checkpoints (experiment_id, sort_order, created_at desc);
